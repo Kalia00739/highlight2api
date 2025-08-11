@@ -2,14 +2,14 @@ import base64
 import json
 import time
 import uuid
-from typing import List, Dict, Any, Optional, AsyncGenerator
+from typing import List, Dict, Any, Literal, Optional, AsyncGenerator
 
 import httpx
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 # 导入identifier模块
@@ -29,16 +29,60 @@ model_cache: Dict[str, Dict[str, Any]] = {}
 security = HTTPBearer()
 
 
+class OpenAIToolCallFunction(BaseModel):
+    """工具调用函数"""
+
+    name: str | None = Field(None, description="函数名称")
+    arguments: str | None = Field(None, description="JSON格式的函数参数")
+
+
+class OpenAIDeltaToolCall(BaseModel):
+    index: int | None = Field(None, description="工具调用索引")
+    id: str | None = Field(None, description="工具调用ID")
+    type: Literal["function"] | None = Field(None, description="调用类型")
+    function: OpenAIToolCallFunction | None = Field(None, description="函数详情增量")
+
+
+class OpenAIMessageContent(BaseModel):
+    """OpenAI消息内容项"""
+
+    type: Literal["text", "image_url"] = Field(description="内容类型")
+    text: str | None = Field(None, description="文本内容")
+    image_url: dict[str, str] | None = Field(None, description="图像URL配置")
+
+
 # Pydantic 模型定义
 class Message(BaseModel):
     role: str
-    content: str
+    content: str | list[OpenAIMessageContent] | None = Field(description="消息内容")
+    tool_call_id: str | None = Field(default=None)
+    tool_calls: list[dict[str, Any]] | None = Field(
+        None, description="工具调用信息（当role为assistant时）"
+    )
+
+
+class OpenAIToolFunction(BaseModel):
+    """OpenAI工具函数定义"""
+
+    name: str = Field(description="函数名称")
+    description: str | None = Field(None, description="函数描述")
+    parameters: dict[str, Any] | None = Field(
+        None, description="JSON Schema格式的函数参数"
+    )
+
+
+class OpenAITool(BaseModel):
+    """OpenAI工具定义"""
+
+    type: Literal["function"] = Field("function", description="工具类型")
+    function: OpenAIToolFunction = Field(description="函数定义")
 
 
 class ChatCompletionRequest(BaseModel):
     messages: List[Message]
     stream: Optional[bool] = False
     model: Optional[str] = "gpt-4o"
+    tools: list[OpenAITool] | None = Field(None, description="可用工具定义")
 
 
 class Model(BaseModel):
@@ -89,7 +133,7 @@ def parse_jwt_payload(jwt_token: str) -> Optional[Dict[str, Any]]:
     """解析JWT token的payload部分"""
     try:
         # JWT格式：header.payload.signature
-        parts = jwt_token.split('.')
+        parts = jwt_token.split(".")
         if len(parts) != 3:
             return None
 
@@ -98,7 +142,7 @@ def parse_jwt_payload(jwt_token: str) -> Optional[Dict[str, Any]]:
         # 补齐base64编码所需的padding
         padding = len(payload) % 4
         if padding:
-            payload += '=' * (4 - padding)
+            payload += "=" * (4 - padding)
 
         decoded_bytes = base64.urlsafe_b64decode(payload)
         payload_data = json.loads(decoded_bytes)
@@ -114,7 +158,7 @@ async def refresh_access_token(rt: str) -> str:
             response = await client.post(
                 f"{HIGHLIGHT_BASE_URL}/api/v1/auth/refresh",
                 json={"refreshToken": rt},
-                headers={"Content-Type": "application/json"}
+                headers={"Content-Type": "application/json"},
             )
 
             if response.status_code != 200:
@@ -128,12 +172,16 @@ async def refresh_access_token(rt: str) -> str:
 
             # 解析JWT获取过期时间
             payload = parse_jwt_payload(new_access_token)
-            expires_at = payload.get("exp", int(time.time()) + 3600) if payload else int(time.time()) + 3600
+            expires_at = (
+                payload.get("exp", int(time.time()) + 3600)
+                if payload
+                else int(time.time()) + 3600
+            )
 
             # 更新缓存
             access_tokens[rt] = {
                 "access_token": new_access_token,
-                "expires_at": expires_at
+                "expires_at": expires_at,
             }
 
             return new_access_token
@@ -165,8 +213,8 @@ async def fetch_models_from_upstream(access_token: str) -> Dict[str, Dict[str, A
                 f"{HIGHLIGHT_BASE_URL}/api/v1/models",
                 headers={
                     "Authorization": f"Bearer {access_token}",
-                    "User-Agent": USER_AGENT
-                }
+                    "User-Agent": USER_AGENT,
+                },
             )
 
             if response.status_code != 200:
@@ -184,7 +232,7 @@ async def fetch_models_from_upstream(access_token: str) -> Dict[str, Dict[str, A
                     "id": model["id"],
                     "name": model["name"],
                     "provider": model["provider"],
-                    "isFree": model.get("pricing", {}).get("isFree", False)
+                    "isFree": model.get("pricing", {}).get("isFree", False),
                 }
 
             return model_cache
@@ -204,7 +252,9 @@ async def get_models(access_token: str) -> Dict[str, Dict[str, Any]]:
 
 
 # API 请求头
-def get_highlight_headers(access_token: str, identifier: Optional[str] = None) -> Dict[str, str]:
+def get_highlight_headers(
+    access_token: str, identifier: Optional[str] = None
+) -> Dict[str, str]:
     headers = {
         "accept": "*/*",
         "accept-encoding": "gzip, deflate, br, zstd",
@@ -212,9 +262,9 @@ def get_highlight_headers(access_token: str, identifier: Optional[str] = None) -
         "authorization": f"Bearer {access_token}",
         "content-type": "application/json",
         "user-agent": USER_AGENT,
-        "sec-ch-ua": "\"Not/A)Brand\";v=\"8\", \"Chromium\";v=\"126\"",
+        "sec-ch-ua": '"Not/A)Brand";v="8", "Chromium";v="126"',
         "sec-ch-ua-mobile": "?0",
-        "sec-ch-ua-platform": "\"Windows\"",
+        "sec-ch-ua-platform": '"Windows"',
     }
 
     if identifier:
@@ -223,7 +273,9 @@ def get_highlight_headers(access_token: str, identifier: Optional[str] = None) -
     return headers
 
 
-async def get_user_info_from_token(credentials: HTTPAuthorizationCredentials) -> Dict[str, Any]:
+async def get_user_info_from_token(
+    credentials: HTTPAuthorizationCredentials,
+) -> Dict[str, Any]:
     """从Bearer token中解析用户信息"""
     if not credentials or not credentials.credentials:
         raise HTTPException(status_code=401, detail="Missing authorization token")
@@ -248,40 +300,67 @@ async def list_models(credentials: HTTPAuthorizationCredentials = Depends(securi
     # 构造返回数据
     model_list = []
     for model_name, model_info in models.items():
-        model_list.append(Model(
-            id=model_name,  # 使用model name作为对外的id
-            object="model",
-            created=int(time.time()),
-            owned_by=model_info["provider"]
-        ))
+        model_list.append(
+            Model(
+                id=model_name,  # 使用model name作为对外的id
+                object="model",
+                created=int(time.time()),
+                owned_by=model_info["provider"],
+            )
+        )
 
-    return ModelsResponse(
-        object="list",
-        data=model_list
-    )
+    return ModelsResponse(object="list", data=model_list)
 
 
 def format_messages_to_prompt(messages: List[Message]) -> str:
     """将 OpenAI 格式的消息列表转换为单个提示字符串"""
     formatted_messages = []
     for message in messages:
-        if message.role and message.content:
-            formatted_messages.append(f"{message.role}: {message.content}")
+        if message.role:
+            if message.content:
+                if isinstance(message.content, list):
+                    for item in message.content:
+                        formatted_messages.append(f"{message.role}: {item.text}")
+                else:
+                    formatted_messages.append(f"{message.role}: {message.content}")
+            if message.tool_calls:
+                formatted_messages.append(
+                    f"{message.role}: {json.dumps(message.tool_calls)}"
+                )
+            if message.tool_call_id:
+                formatted_messages.append(
+                    f"{message.role}: tool_call_id: {message.tool_call_id} {message.content}"
+                )
     return "\n\n".join(formatted_messages)
+
+
+def format_openai_tools(openai_tools: Optional[list[OpenAITool]]) -> List:
+    tools = []
+    if openai_tools is None:
+        return tools
+
+    for tool in openai_tools:
+        tool = tool.function
+        tools.append(
+            {
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.parameters,
+            }
+        )
+    return tools
 
 
 async def parse_sse_line(line: str) -> Optional[str]:
     """解析SSE数据行"""
     line = line.strip()
-    if line.startswith('data: '):
+    if line.startswith("data: "):
         return line[6:]  # 去掉 'data: ' 前缀
     return None
 
 
 async def stream_generator(
-        highlight_data: Dict[str, Any],
-        headers: Dict[str, str],
-        model: str
+    highlight_data: Dict[str, Any], headers: Dict[str, str], model: str
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """生成SSE流数据的异步生成器"""
     response_id = f"chatcmpl-{str(uuid.uuid4())}"
@@ -292,17 +371,16 @@ async def stream_generator(
         timeout = httpx.Timeout(60.0, connect=10.0)
         async with httpx.AsyncClient(verify=False, timeout=timeout) as client:
             async with client.stream(
-                    "POST",
-                    HIGHLIGHT_BASE_URL+'/api/v1/chat',
-                    headers=headers,
-                    json=highlight_data
+                "POST",
+                HIGHLIGHT_BASE_URL + "/api/v1/chat",
+                headers=headers,
+                json=highlight_data,
             ) as response:
-
                 if response.status_code != 200:
                     error_data = {
-                        'error': {
-                            'message': f'Highlight API returned status code {response.status_code}',
-                            'type': 'api_error'
+                        "error": {
+                            "message": f"Highlight API returned status code {response.status_code}",
+                            "type": "api_error",
                         }
                     }
                     yield {"event": "error", "data": json.dumps(error_data)}
@@ -310,15 +388,17 @@ async def stream_generator(
 
                 # 发送初始消息
                 initial_chunk = {
-                    'id': response_id,
-                    'object': 'chat.completion.chunk',
-                    'created': created,
-                    'model': model,
-                    'choices': [{
-                        'index': 0,
-                        'delta': {'role': 'assistant'},
-                        'finish_reason': None
-                    }]
+                    "id": response_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"role": "assistant"},
+                            "finish_reason": None,
+                        }
+                    ],
                 }
                 yield {"data": json.dumps(initial_chunk)}
 
@@ -328,15 +408,15 @@ async def stream_generator(
                     if chunk:
                         # 解码字节数据
                         try:
-                            chunk_text = chunk.decode('utf-8')
+                            chunk_text = chunk.decode("utf-8")
                         except UnicodeDecodeError:
-                            chunk_text = chunk.decode('utf-8', errors='ignore')
+                            chunk_text = chunk.decode("utf-8", errors="ignore")
 
                         buffer += chunk_text
 
                         # 按行处理数据
-                        while '\n' in buffer:
-                            line, buffer = buffer.split('\n', 1)
+                        while "\n" in buffer:
+                            line, buffer = buffer.split("\n", 1)
 
                             # 解析SSE行
                             data = await parse_sse_line(line)
@@ -347,32 +427,63 @@ async def stream_generator(
                                         content = event_data.get("content", "")
                                         if content:
                                             chunk_data = {
-                                                'id': response_id,
-                                                'object': 'chat.completion.chunk',
-                                                'created': created,
-                                                'model': model,
-                                                'choices': [{
-                                                    'index': 0,
-                                                    'delta': {'content': content},
-                                                    'finish_reason': None
-                                                }]
+                                                "id": response_id,
+                                                "object": "chat.completion.chunk",
+                                                "created": created,
+                                                "model": model,
+                                                "choices": [
+                                                    {
+                                                        "index": 0,
+                                                        "delta": {"content": content},
+                                                        "finish_reason": None,
+                                                    }
+                                                ],
                                             }
                                             yield {"data": json.dumps(chunk_data)}
+                                    elif event_data.get("type") == "toolUse":
+                                        tool_name = event_data.get("name", "")
+                                        tool_id = event_data.get("toolId", "")
+                                        tool_input = event_data.get("input", "")
+                                        if tool_name:
+                                            chunk_data = {
+                                                "id": response_id,
+                                                "object": "chat.completion.chunk",
+                                                "created": created,
+                                                "model": model,
+                                                "choices": [
+                                                    {
+                                                        "index": 0,
+                                                        "delta": {
+                                                            "tool_calls": [
+                                                                {
+                                                                    "index": 0,
+                                                                    "id": tool_id,
+                                                                    "type": "function",
+                                                                    "function": {
+                                                                        "name": tool_name,
+                                                                        "arguments": tool_input,
+                                                                    },
+                                                                }
+                                                            ]
+                                                        },
+                                                        "finish_reason": None,
+                                                    }
+                                                ],
+                                            }
+                                            yield {"data": json.dumps(chunk_data)}
+
+                                        pass
                                 except json.JSONDecodeError:
                                     # 忽略无效的JSON数据
                                     continue
 
                 # 发送完成消息
                 final_chunk = {
-                    'id': response_id,
-                    'object': 'chat.completion.chunk',
-                    'created': created,
-                    'model': model,
-                    'choices': [{
-                        'index': 0,
-                        'delta': {},
-                        'finish_reason': 'stop'
-                    }]
+                    "id": response_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
                 }
                 yield {"data": json.dumps(final_chunk)}
                 yield {"data": "[DONE]"}
@@ -380,48 +491,38 @@ async def stream_generator(
     except httpx.HTTPError as e:
         logger.exception(f"HTTP error during streaming: {e}")
         error_data = {
-            'error': {
-                'message': f'HTTP error: {str(e)}',
-                'type': 'http_error'
-            }
+            "error": {"message": f"HTTP error: {str(e)}", "type": "http_error"}
         }
         yield {"event": "error", "data": json.dumps(error_data)}
     except Exception as e:
         logger.exception(f"Unexpected error during streaming: {e}")
-        error_data = {
-            'error': {
-                'message': str(e),
-                'type': 'server_error'
-            }
-        }
+        error_data = {"error": {"message": str(e), "type": "server_error"}}
         yield {"event": "error", "data": json.dumps(error_data)}
 
 
 async def non_stream_response(
-        highlight_data: Dict[str, Any],
-        headers: Dict[str, str],
-        model: str
+    highlight_data: Dict[str, Any], headers: Dict[str, str], model: str
 ) -> JSONResponse:
     """处理非流式响应"""
     try:
         timeout = httpx.Timeout(60.0, connect=10.0)
         async with httpx.AsyncClient(verify=False, timeout=timeout) as client:
             async with client.stream(
-                    "POST",
-                    HIGHLIGHT_BASE_URL + '/api/v1/chat',
-                    headers=headers,
-                    json=highlight_data
+                "POST",
+                HIGHLIGHT_BASE_URL + "/api/v1/chat",
+                headers=headers,
+                json=highlight_data,
             ) as response:
 
                 if response.status_code != 200:
                     raise HTTPException(
                         status_code=response.status_code,
                         detail={
-                            'error': {
-                                'message': f'Highlight API returned status code {response.status_code}',
-                                'type': 'api_error'
+                            "error": {
+                                "message": f"Highlight API returned status code {response.status_code}",
+                                "type": "api_error",
                             }
-                        }
+                        },
                     )
 
                 # 收集完整响应
@@ -432,14 +533,14 @@ async def non_stream_response(
                     if chunk:
                         # 解码字节数据
                         try:
-                            chunk_text = chunk.decode('utf-8')
+                            chunk_text = chunk.decode("utf-8")
                         except UnicodeDecodeError:
-                            chunk_text = chunk.decode('utf-8', errors='ignore')
+                            chunk_text = chunk.decode("utf-8", errors="ignore")
 
                         buffer += chunk_text
 
-                        while '\n' in buffer:
-                            line, buffer = buffer.split('\n', 1)
+                        while "\n" in buffer:
+                            line, buffer = buffer.split("\n", 1)
                             data = await parse_sse_line(line)
                             if data and data.strip():
                                 try:
@@ -454,24 +555,17 @@ async def non_stream_response(
                 created = int(time.time())
                 response_data = ChatCompletionResponse(
                     id=response_id,
-                    object='chat.completion',
+                    object="chat.completion",
                     created=created,
                     model=model,
                     choices=[
                         Choice(
                             index=0,
-                            message={
-                                'role': 'assistant',
-                                'content': full_response
-                            },
-                            finish_reason='stop'
+                            message={"role": "assistant", "content": full_response},
+                            finish_reason="stop",
                         )
                     ],
-                    usage=Usage(
-                        prompt_tokens=-1,
-                        completion_tokens=-1,
-                        total_tokens=-1
-                    )
+                    usage=Usage(prompt_tokens=0, completion_tokens=0, total_tokens=0),
                 )
                 return JSONResponse(content=response_data.dict())
 
@@ -479,30 +573,22 @@ async def non_stream_response(
         raise HTTPException(
             status_code=500,
             detail={
-                'error': {
-                    'message': f'HTTP error: {str(e)}',
-                    'type': 'http_error'
-                }
-            }
+                "error": {"message": f"HTTP error: {str(e)}", "type": "http_error"}
+            },
         )
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail={
-                'error': {
-                    'message': str(e),
-                    'type': 'server_error'
-                }
-            }
+            detail={"error": {"message": str(e), "type": "server_error"}},
         )
 
 
 @app.post("/v1/chat/completions")
 async def chat_completions(
-        request: ChatCompletionRequest,
-        credentials: HTTPAuthorizationCredentials = Depends(security)
+    request: ChatCompletionRequest,
+    credentials: HTTPAuthorizationCredentials = Depends(security),
 ):
     """处理聊天完成请求"""
     user_info = await get_user_info_from_token(credentials)
@@ -511,7 +597,7 @@ async def chat_completions(
     if not all(field in user_info for field in required_fields):
         raise HTTPException(
             status_code=401,
-            detail="Invalid authorization token - missing required fields"
+            detail="Invalid authorization token - missing required fields",
         )
 
     rt = user_info["rt"]
@@ -525,12 +611,16 @@ async def chat_completions(
     models = await get_models(access_token)
     model_info = models.get(request.model)
     if not model_info:
-        raise HTTPException(status_code=400, detail=f"Model '{request.model}' not found")
+        raise HTTPException(
+            status_code=400, detail=f"Model '{request.model}' not found"
+        )
 
     model_id = model_info["id"]
-
     # 将 OpenAI 格式的消息转换为单个提示
     prompt = format_messages_to_prompt(request.messages)
+
+    # 处理tool
+    tools = format_openai_tools(request.tools)
 
     # 获取identifier
     identifier = get_identifier(user_id, client_uuid)
@@ -540,14 +630,13 @@ async def chat_completions(
         "prompt": prompt,
         "attachedContext": [],
         "modelId": model_id,
-        "additionalTools": [],
+        "additionalTools": tools,
         "backendPlugins": [],
-        "useMemory": True,
+        "useMemory": False,
         "useKnowledge": False,
         "ephemeral": False,
-        "timezone": "Asia/Hong_Kong"
+        "timezone": "Asia/Hong_Kong",
     }
-
     headers = get_highlight_headers(access_token, identifier)
 
     if request.stream:
@@ -557,8 +646,8 @@ async def chat_completions(
             headers={
                 "Cache-Control": "no-cache",
                 "Connection": "keep-alive",
-                "X-Accel-Buffering": "no"
-            }
+                "X-Accel-Buffering": "no",
+            },
         )
     else:
         return await non_stream_response(highlight_data, headers, request.model)
@@ -571,13 +660,13 @@ async def health_check():
     return {"status": "healthy", "timestamp": int(time.time())}
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run(
         "main:app",  # 假设文件名为 main.py
-        host='0.0.0.0',
+        host="0.0.0.0",
         port=8080,
         reload=False,
-        log_level="info"
+        log_level="info",
     )
