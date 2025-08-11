@@ -5,7 +5,7 @@
 ## 🚀 一键部署
 
 ```bash
-docker run -d -p 8080:8080 ghcr.io/jhhgiyv/highlight2api:latest
+docker run -d -p 8080:8080 --name highlight2api ghcr.io/jhhgiyv/highlight2api:latest
 ```
 
 ## 📝 获取 API Key
