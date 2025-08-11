@@ -54,8 +54,10 @@ class OpenAIMessageContent(BaseModel):
 # Pydantic 模型定义
 class Message(BaseModel):
     role: str
-    content: str | list[OpenAIMessageContent] | None = Field(description="消息内容")
-    tool_call_id: str | None = Field(default=None)
+    content: str | list[OpenAIMessageContent] | None = Field(
+        None, description="消息内容"
+    )
+    tool_call_id: str | None = Field(None)
     tool_calls: list[dict[str, Any]] | None = Field(
         None, description="工具调用信息（当role为assistant时）"
     )
