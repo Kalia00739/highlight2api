@@ -6,6 +6,7 @@ from typing import Dict, Any, Optional
 import httpx
 from fastapi import HTTPException
 from fastapi.security import HTTPAuthorizationCredentials
+from loguru import logger
 
 from .config import HIGHLIGHT_BASE_URL, USER_AGENT, TLS_VERIFY
 
@@ -71,6 +72,7 @@ async def get_user_info_from_token(credentials: HTTPAuthorizationCredentials) ->
 
 async def refresh_access_token(rt: str) -> str:
     """使用refresh token获取新的access token"""
+    logger.debug(f"{rt} 刷新")
     url = f"{HIGHLIGHT_BASE_URL}/api/v1/auth/refresh"
     headers = {"Content-Type": "application/json", "User-Agent": USER_AGENT}
     json_data = {"refreshToken": rt}
@@ -79,21 +81,17 @@ async def refresh_access_token(rt: str) -> str:
         try:
             response = await client.post(url, headers=headers, json=json_data)
 
-            if response.status_code == 401:
-                # refresh token 过期或无效
-                raise HTTPException(
-                    status_code=401, detail="Refresh token expired or invalid"
-                )
-
             if response.status_code != 200:
                 raise HTTPException(
-                    status_code=500, detail="Failed to refresh access token"
+                    status_code=500,
+                    detail=f"Failed to refresh access token, response: {response.status_code} {response.text}"
                 )
 
             resp_json = response.json()
             if not resp_json.get("success"):
                 raise HTTPException(
-                    status_code=500, detail="Failed to refresh access token"
+                    status_code=500,
+                    detail=f"Failed to refresh access token, response: {response.status_code} {response.text}"
                 )
 
             access_token = resp_json["data"]["accessToken"]
@@ -111,8 +109,11 @@ async def refresh_access_token(rt: str) -> str:
             )
 
 
-async def get_access_token(rt: str) -> str:
+async def get_access_token(rt: str, refresh=False) -> str:
     """获取access token（带缓存）"""
+    if refresh:
+        return await refresh_access_token(rt)
+
     current_time = int(time.time())
 
     # 检查缓存

@@ -106,7 +106,7 @@ async def chat_completions(
 
     if request.stream:
         return EventSourceResponse(
-            stream_generator(highlight_data, headers, request.model),
+            stream_generator(highlight_data, headers, request.model, rt),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -115,7 +115,7 @@ async def chat_completions(
             },
         )
     else:
-        return await non_stream_response(highlight_data, headers, request.model)
+        return await non_stream_response(highlight_data, headers, request.model, rt)
 
 
 @router.get("/health")
