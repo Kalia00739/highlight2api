@@ -8,7 +8,7 @@ from fastapi import HTTPException
 from fastapi.responses import JSONResponse
 from loguru import logger
 
-from .auth import get_access_token
+from .auth import get_access_token, get_highlight_headers
 from .config import HIGHLIGHT_BASE_URL, TLS_VERIFY
 from .models import ChatCompletionResponse, Choice, Usage
 
@@ -22,7 +22,7 @@ async def parse_sse_line(line: str) -> Optional[str]:
 
 
 async def stream_generator(
-        highlight_data: Dict[str, Any], headers: Dict[str, str], model: str, rt: str
+        highlight_data: Dict[str, Any], access_token: str, identifier: str, model: str, rt: str
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """生成流式响应"""
     response_id = f"chatcmpl-{str(uuid.uuid4())}"
@@ -31,6 +31,7 @@ async def stream_generator(
     try:
         for i in range(2):
             # 使用httpx的流式请求
+            headers = get_highlight_headers(access_token, identifier)
             timeout = httpx.Timeout(60.0, connect=10.0)
             async with httpx.AsyncClient(verify=TLS_VERIFY, timeout=timeout) as client:
                 async with client.stream(
@@ -40,7 +41,7 @@ async def stream_generator(
                         json=highlight_data,
                 ) as response:
                     if response.status_code == 401 and i == 0:
-                        headers['accessToken'] = await get_access_token(rt, True)
+                        access_token = await get_access_token(rt, True)
                         continue
                     if response.status_code != 200:
                         error_content = await response.aread()
@@ -168,11 +169,12 @@ async def stream_generator(
 
 
 async def non_stream_response(
-        highlight_data: Dict[str, Any], headers: Dict[str, str], model: str, rt: str
+        highlight_data: Dict[str, Any], access_token: str, identifier: str, model: str, rt: str
 ) -> JSONResponse:  # type: ignore
     """处理非流式响应"""
     try:
         for i in range(2):
+            headers = get_highlight_headers(access_token, identifier)
             timeout = httpx.Timeout(60.0, connect=10.0)
             async with httpx.AsyncClient(verify=TLS_VERIFY, timeout=timeout) as client:
                 async with client.stream(
@@ -182,7 +184,7 @@ async def non_stream_response(
                         json=highlight_data,
                 ) as response:
                     if response.status_code == 401 and i == 0:
-                        headers['accessToken'] = await get_access_token(rt, True)
+                        access_token = await get_access_token(rt, True)
                         continue
 
                     if response.status_code != 200:
