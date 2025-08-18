@@ -99,7 +99,7 @@ async def chat_completions(
         "backendPlugins": [],
         "useMemory": False,
         "useKnowledge": False,
-        "ephemeral": False,
+        "ephemeral": True,
         "timezone": "Asia/Hong_Kong",
     }
 
