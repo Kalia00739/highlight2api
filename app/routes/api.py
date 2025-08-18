@@ -1,7 +1,9 @@
+import json
 import time
 
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from loguru import logger
 from sse_starlette.sse import EventSourceResponse
 
 from identifier import get_identifier
@@ -102,6 +104,7 @@ async def chat_completions(
         "ephemeral": True,
         "timezone": "Asia/Hong_Kong",
     }
+    # logger.debug(json.dumps(highlight_data,ensure_ascii=False))
 
     if request.stream:
         return EventSourceResponse(

@@ -33,6 +33,7 @@ async def stream_generator(
             # 使用httpx的流式请求
             headers = get_highlight_headers(access_token, identifier)
             timeout = httpx.Timeout(60.0, connect=10.0)
+            tool_call_idx = 0
             async with httpx.AsyncClient(verify=TLS_VERIFY, timeout=timeout) as client:
                 async with client.stream(
                         "POST",
@@ -86,6 +87,7 @@ async def stream_generator(
                             # 按行处理数据
                             while "\n" in buffer:
                                 line, buffer = buffer.split("\n", 1)
+                                # logger.debug(line)
 
                                 # 解析SSE行
                                 data = await parse_sse_line(line)
@@ -125,7 +127,7 @@ async def stream_generator(
                                                             "delta": {
                                                                 "tool_calls": [
                                                                     {
-                                                                        "index": 0,
+                                                                        "index": tool_call_idx,
                                                                         "id": tool_id,
                                                                         "type": "function",
                                                                         "function": {
@@ -139,6 +141,9 @@ async def stream_generator(
                                                         }
                                                     ],
                                                 }
+                                                tool_call_idx += 1
+                                                # logger.debug(
+                                                #     json.dumps({"data": json.dumps(chunk_data)}, ensure_ascii=False))
                                                 yield {"data": json.dumps(chunk_data)}
                                     except json.JSONDecodeError:
                                         # 忽略无效的JSON数据
